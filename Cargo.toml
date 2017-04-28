@@ -1,0 +1,7 @@
+[package]
+name = "rash"
+version = "0.1.0"
+authors = ["Mark Mansi <markm@cs.wisc.edu>"]
+
+[dependencies]
+ssh2 = "0.3.1"
