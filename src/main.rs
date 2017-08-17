@@ -4,7 +4,7 @@ use std::env;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::net::{TcpStream};
+use std::net::TcpStream;
 use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
@@ -13,33 +13,46 @@ use ssh2::Session;
 struct SshConnection<'a> {
     machine: &'a str,
     user: &'a str,
-    tcp: TcpStream,
-    sess: Session,
+    pub_key: &'a str,
+    priv_key: &'a str,
+    tcp: Option<TcpStream>,
+    sess: Option<Session>,
+}
+
+fn connect(conn: &mut SshConnection) {
+    let mut tcp = TcpStream::connect(conn.machine);
+    while let Err(..) = tcp {
+        tcp = TcpStream::connect(conn.machine);
+    }
+
+    conn.tcp = tcp.ok();
+
+    conn.sess = Session::new();
+    conn.sess
+        .as_mut()
+        .unwrap()
+        .handshake(conn.tcp.as_mut().unwrap())
+        .unwrap();
+
+    conn.sess
+        .as_mut()
+        .unwrap()
+        .userauth_pubkey_file(conn.user,
+                              Some(Path::new(conn.pub_key)),
+                              Path::new(conn.priv_key),
+                              None)
+        .unwrap();
 }
 
 fn handle_special(conn: &mut SshConnection, cmd: &str) {
-    if cmd == "##sleep" {
-        println!("{}", cmd);
-        sleep(Duration::new(120, 0));
-    } else if cmd == "##reconnect" {
-        let mut tcp = TcpStream::connect(conn.machine);
-        while let Err(..) = tcp {
-            tcp = TcpStream::connect(conn.machine);
+    match cmd {
+        "##sleep" => {
+            println!("{}", cmd);
+            sleep(Duration::new(120, 0));
         }
-
-        conn.tcp = tcp.unwrap();
-
-        conn.sess = Session::new().unwrap();
-        conn.sess.handshake(&conn.tcp).unwrap();
-
-        conn.sess.userauth_pubkey_file(conn.user,
-                                  Some(Path::new("/afs/cs.wisc.edu/u/m/a/markm/.ssh/id_rsa.pub")),
-                                  Path::new("/afs/cs.wisc.edu/u/m/a/markm/.ssh/id_rsa"),
-                                  None).unwrap();
-        println!("Reconnected!");
+        "##reconnect" => connect(conn),
+        _ => println!("Command {} not recognized", cmd),
     }
-
-    println!("=======================");
 }
 
 fn main() {
@@ -52,17 +65,23 @@ fn main() {
     let f = File::open(script).expect("Unable to open script");
     let f = BufReader::new(f);
 
+    let home = env::var("HOME").unwrap_or_else(|_| {
+                                                   format!("/home/{}",
+                env::var("USER").expect("Expected $USER or $HOME to be set"))
+                                               });
+    let ssh_dir = format!("{}/.ssh", home);
+
+    let mut conn = SshConnection {
+        machine: &machine,
+        user: &user,
+        pub_key: &format!("{}/id_rsa.pub", ssh_dir),
+        priv_key: &format!("{}/id_rsa", ssh_dir),
+        tcp: None,
+        sess: None,
+    };
+
     // Connect to the local SSH server
-    let tcp = TcpStream::connect(&machine).unwrap();
-    let mut sess = Session::new().unwrap();
-    sess.handshake(&tcp).unwrap();
-
-    sess.userauth_pubkey_file(&user,
-                              Some(Path::new("/afs/cs.wisc.edu/u/m/a/markm/.ssh/id_rsa.pub")),
-                              Path::new("/afs/cs.wisc.edu/u/m/a/markm/.ssh/id_rsa"),
-                              None).unwrap();
-
-    let mut conn = SshConnection {tcp, sess, user: &user, machine: &machine};
+    connect(&mut conn);
 
     // Assume one command per line
     for cmd in f.lines() {
@@ -82,8 +101,9 @@ fn main() {
             }
         }
 
-        let mut channel = conn.sess.channel_session().unwrap();
+        let mut channel = conn.sess.as_mut().unwrap().channel_session().unwrap();
 
+        println!("=======================");
         println!("> {}", cmd);
         channel.exec(&cmd).unwrap();
 
@@ -108,7 +128,5 @@ fn main() {
             Ok(..) => channel.wait_close().unwrap(),
             Err(e) => println!("Error {:?}", e),
         }
-
-        println!("=======================");
     }
 }
